@@ -51,11 +51,11 @@ export async function POST(req: Request) {
         break
       case 'Claude Sonnet 4':
         modelProvider = anthropic
-        modelName = 'claude-sonnet-4-20250514'
+        modelName = 'claude-haiku-4-5-20251001'
         break
       case 'Gemini':
         modelProvider = google
-        modelName = 'gemini-2.5-flash'
+        modelName = 'gemini-2.5-flash-lite'
         break
       default:
         return new Response('Invalid model', { status: 400 })
