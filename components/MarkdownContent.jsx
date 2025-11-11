@@ -11,20 +11,15 @@ function fixMarkdown(content) {
   }
 
   let fixed = content
-    // Fix headers that are missing newlines before them (but preserve existing structure)
-    // Only fix if header runs directly into text: "text###Header" -> "text\n###Header"
+    // First, convert common AI patterns that use single * for emphasis to proper markdown bold
+    // Match patterns like "*Label:" or "*Text:" at start of line or after newline
+    .replace(/(^|[\n\r])(\*([^*\n]+?):)/gm, '$1**$3:**')
+    // Also handle mid-line emphasis markers like "text *Label:" -> "text **Label:**"
+    .replace(/(\s)(\*([^*\s][^*\n]{0,50}?):)/g, '$1**$3:**')
+    // Fix headers that are missing newlines before them
     .replace(/([^\n])(#{1,6}\s+)/g, '$1\n$2')
-    // Fix list items that run into text: "text-Item" -> "text\n-Item"
-    // But be careful - only if it's not already part of italic/bold
-    .replace(/([^\n])([-*+]\s+)/g, (match, before, marker) => {
-      // Don't fix if the marker is part of italic/bold (check if there's a matching * before)
-      // Simple heuristic: if there's an odd number of * before this, it might be italic
-      const asterisksBefore = (before.match(/\*/g) || []).length
-      if (marker === '*' && asterisksBefore % 2 === 1) {
-        return match // Likely part of italic, don't fix
-      }
-      return before + '\n' + marker
-    })
+    // Fix dash list items that run into text: "text- Item" -> "text\n- Item"
+    .replace(/([^\n])([-]\s+)/g, '$1\n$2')
     // Fix numbered lists
     .replace(/([^\n])(\d+\.\s+)/g, '$1\n$2')
     // Normalize excessive newlines
