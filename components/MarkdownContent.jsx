@@ -4,7 +4,44 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { cls } from './utils'
 
+// Fix common markdown issues from AI responses
+function fixMarkdown(content) {
+  if (!content || typeof content !== 'string') {
+    return ''
+  }
+
+  let fixed = content
+    // Fix headers that are missing newlines before them (but preserve existing structure)
+    // Only fix if header runs directly into text: "text###Header" -> "text\n###Header"
+    .replace(/([^\n])(#{1,6}\s+)/g, '$1\n$2')
+    // Fix list items that run into text: "text-Item" -> "text\n-Item"
+    // But be careful - only if it's not already part of italic/bold
+    .replace(/([^\n])([-*+]\s+)/g, (match, before, marker) => {
+      // Don't fix if the marker is part of italic/bold (check if there's a matching * before)
+      // Simple heuristic: if there's an odd number of * before this, it might be italic
+      const asterisksBefore = (before.match(/\*/g) || []).length
+      if (marker === '*' && asterisksBefore % 2 === 1) {
+        return match // Likely part of italic, don't fix
+      }
+      return before + '\n' + marker
+    })
+    // Fix numbered lists
+    .replace(/([^\n])(\d+\.\s+)/g, '$1\n$2')
+    // Normalize excessive newlines
+    .replace(/\n{3,}/g, '\n\n')
+
+  return fixed
+}
+
 export default function MarkdownContent({ content, className = '' }) {
+  // Return empty div if no content
+  if (!content || typeof content !== 'string' || !content.trim()) {
+    return <div className={cls('markdown-content', className)} />
+  }
+
+  // Fix common markdown issues
+  const fixedContent = fixMarkdown(content)
+
   return (
     <div className={cls('markdown-content', className)}>
       <ReactMarkdown
@@ -35,13 +72,13 @@ export default function MarkdownContent({ content, className = '' }) {
           ),
           // Lists
           ul: ({ node, ...props }) => (
-            <ul className="list-disc list-inside mb-2 space-y-1 ml-4" {...props} />
+            <ul className="list-disc mb-2 space-y-1 ml-4 pl-2" {...props} />
           ),
           ol: ({ node, ...props }) => (
-            <ol className="list-decimal list-inside mb-2 space-y-1 ml-4" {...props} />
+            <ol className="list-decimal mb-2 space-y-1 ml-4 pl-2" {...props} />
           ),
           li: ({ node, ...props }) => (
-            <li {...props} />
+            <li className="leading-relaxed" {...props} />
           ),
           // Code blocks
           code: ({ node, inline, className, children, ...props }) => {
@@ -122,7 +159,7 @@ export default function MarkdownContent({ content, className = '' }) {
           ),
         }}
       >
-        {content}
+        {fixedContent}
       </ReactMarkdown>
     </div>
   )
