@@ -7,9 +7,38 @@ import Header from "./Header"
 import ChatPane from "./ChatPane"
 import GhostIconButton from "./GhostIconButton"
 import ThemeToggle from "./ThemeToggle"
-import { INITIAL_CONVERSATIONS, INITIAL_TEMPLATES, INITIAL_FOLDERS } from "./mockData"
+import { useAuth } from "@/contexts/AuthContext"
+import { 
+  getConversationsClient, 
+  createConversationClient, 
+  updateConversationClient,
+  addMessageClient,
+  updateMessageClient,
+  getFoldersClient,
+  createFolderClient,
+  updateFolderClient,
+  deleteFolderClient,
+  getTemplatesClient,
+  createTemplateClient,
+  updateTemplateClient,
+  deleteTemplateClient
+} from "@/lib/supabase/db-client"
 
 export default function AIAssistantUI() {
+  const { loading: authLoading, user } = useAuth()
+
+  if (authLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-zinc-50 dark:bg-zinc-950">
+        <div className="text-center">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-sm dark:from-zinc-200 dark:to-zinc-300 dark:text-zinc-900 mb-4">
+            <span className="text-xl">✱</span>
+          </div>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">Loading...</p>
+        </div>
+      </div>
+    )
+  }
   const [theme, setTheme] = useState(() => {
     const saved = typeof window !== "undefined" && localStorage.getItem("theme")
     if (saved) return saved
@@ -71,16 +100,20 @@ export default function AIAssistantUI() {
     } catch {}
   }, [sidebarCollapsed])
 
-  const [conversations, setConversations] = useState(INITIAL_CONVERSATIONS)
+  const [conversations, setConversations] = useState([])
   const [selectedId, setSelectedId] = useState(null)
-  const [templates, setTemplates] = useState(INITIAL_TEMPLATES)
-  const [folders, setFolders] = useState(INITIAL_FOLDERS)
+  const [templates, setTemplates] = useState([])
+  const [folders, setFolders] = useState([])
+  const [selectedModel, setSelectedModel] = useState("DeepSeek")
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
 
   const [query, setQuery] = useState("")
   const searchRef = useRef(null)
 
   const [isThinking, setIsThinking] = useState(false)
   const [thinkingConvId, setThinkingConvId] = useState(null)
+  const [streamingMessageId, setStreamingMessageId] = useState(null)
 
   useEffect(() => {
     const onKey = (e) => {
@@ -101,11 +134,49 @@ export default function AIAssistantUI() {
     return () => window.removeEventListener("keydown", onKey)
   }, [sidebarOpen, conversations])
 
+  // Load data from database on mount
+  useEffect(() => {
+    if (!user || authLoading) return
+
+    async function loadData() {
+      try {
+        setLoading(true)
+        setError(null)
+        const [convs, folds, temps] = await Promise.all([
+          getConversationsClient(user.id),
+          getFoldersClient(user.id),
+          getTemplatesClient(user.id),
+        ])
+        
+        setConversations(convs)
+        setFolders(folds)
+        setTemplates(temps)
+        
+        // Select first conversation or create new one
+        if (convs.length > 0 && !selectedId) {
+          setSelectedId(convs[0].id)
+        } else if (convs.length === 0) {
+          // Auto-create first chat if none exist
+          const newConv = await createConversationClient(user.id, "New Chat", selectedModel)
+          setConversations([newConv])
+          setSelectedId(newConv.id)
+        }
+      } catch (err) {
+        console.error('Error loading data:', err)
+        setError(err.message || 'Failed to load data')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadData()
+  }, [user, authLoading])
+
   useEffect(() => {
     if (!selectedId && conversations.length > 0) {
-      createNewChat()
+      setSelectedId(conversations[0].id)
     }
-  }, [])
+  }, [conversations])
 
   const filtered = useMemo(() => {
     if (!query.trim()) return conversations
@@ -121,104 +192,247 @@ export default function AIAssistantUI() {
     .slice(0, 10)
 
   const folderCounts = React.useMemo(() => {
-    const map = Object.fromEntries(folders.map((f) => [f.name, 0]))
-    for (const c of conversations) if (map[c.folder] != null) map[c.folder] += 1
+    const map = Object.fromEntries(folders.map((f) => [f.id, 0]))
+    for (const c of conversations) {
+      if (c.folder_id && map[c.folder_id] != null) {
+        map[c.folder_id] += 1
+      }
+    }
     return map
   }, [conversations, folders])
 
-  function togglePin(id) {
-    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)))
-  }
-
-  function createNewChat() {
-    const id = Math.random().toString(36).slice(2)
-    const item = {
-      id,
-      title: "New Chat",
-      updatedAt: new Date().toISOString(),
-      messageCount: 0,
-      preview: "Say hello to start...",
-      pinned: false,
-      folder: "Work Projects",
-      messages: [], // Ensure messages array is empty for new chats
+  async function togglePin(id) {
+    const conv = conversations.find((c) => c.id === id)
+    if (!conv) return
+    
+    try {
+      await updateConversationClient(id, { pinned: !conv.pinned })
+      setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)))
+    } catch (err) {
+      console.error('Error toggling pin:', err)
+      setError(err.message || 'Failed to update conversation')
     }
-    setConversations((prev) => [item, ...prev])
-    setSelectedId(id)
-    setSidebarOpen(false)
   }
 
-  function createFolder() {
+  async function createNewChat() {
+    if (!user) return
+    
+    try {
+      const newConv = await createConversationClient(user.id, "New Chat", selectedModel)
+      setConversations((prev) => [newConv, ...prev])
+      setSelectedId(newConv.id)
+      setSidebarOpen(false)
+    } catch (err) {
+      console.error('Error creating conversation:', err)
+      setError(err.message || 'Failed to create conversation')
+    }
+  }
+
+  async function createFolder() {
+    if (!user) return
+    
     const name = prompt("Folder name")
     if (!name) return
-    if (folders.some((f) => f.name.toLowerCase() === name.toLowerCase())) return alert("Folder already exists.")
-    setFolders((prev) => [...prev, { id: Math.random().toString(36).slice(2), name }])
+    
+    try {
+      const newFolder = await createFolderClient(user.id, name)
+      setFolders((prev) => [...prev, newFolder])
+    } catch (err) {
+      alert(err.message || 'Failed to create folder')
+    }
   }
 
-  function sendMessage(convId, content) {
-    if (!content.trim()) return
-    const now = new Date().toISOString()
-    const userMsg = { id: Math.random().toString(36).slice(2), role: "user", content, createdAt: now }
+  async function sendMessage(convId, content) {
+    if (!content.trim() || !user) return
+    
+    const conversation = conversations.find((c) => c.id === convId)
+    if (!conversation) return
 
-    setConversations((prev) =>
-      prev.map((c) => {
-        if (c.id !== convId) return c
-        const msgs = [...(c.messages || []), userMsg]
-        return {
-          ...c,
-          messages: msgs,
-          updatedAt: now,
-          messageCount: msgs.length,
-          preview: content.slice(0, 80),
-        }
-      }),
-    )
-
-    setIsThinking(true)
-    setThinkingConvId(convId)
-
-    const currentConvId = convId
-    setTimeout(() => {
-      // Always clear thinking state and generate response for this specific conversation
-      setIsThinking(false)
-      setThinkingConvId(null)
+    try {
+      // Save user message to database
+      const userMsg = await addMessageClient(convId, 'user', content)
+      
+      // Update UI optimistically
       setConversations((prev) =>
         prev.map((c) => {
-          if (c.id !== currentConvId) return c
-          const ack = `Got it — I'll help with that.`
-          const asstMsg = {
-            id: Math.random().toString(36).slice(2),
-            role: "assistant",
-            content: ack,
-            createdAt: new Date().toISOString(),
-          }
-          const msgs = [...(c.messages || []), asstMsg]
+          if (c.id !== convId) return c
+          const msgs = [...(c.messages || []), userMsg]
           return {
             ...c,
             messages: msgs,
-            updatedAt: new Date().toISOString(),
             messageCount: msgs.length,
-            preview: asstMsg.content.slice(0, 80),
+            preview: content.slice(0, 80),
           }
         }),
       )
-    }, 2000)
+
+      // Generate title from first message if it's still "New Chat"
+      if (conversation.title === "New Chat" && conversation.messages?.length === 0) {
+        const title = content.slice(0, 50) + (content.length > 50 ? '...' : '')
+        await updateConversationClient(convId, { title })
+        setConversations((prev) =>
+          prev.map((c) => (c.id === convId ? { ...c, title } : c))
+        )
+      }
+
+      setIsThinking(true)
+      setThinkingConvId(convId)
+
+      // Create assistant message placeholder
+      const assistantMsgId = Math.random().toString(36).slice(2)
+      const assistantMsg = {
+        id: assistantMsgId,
+        conversation_id: convId,
+        role: 'assistant',
+        content: '',
+        created_at: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        edited_at: null,
+      }
+
+      setStreamingMessageId(assistantMsgId)
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== convId) return c
+          return {
+            ...c,
+            messages: [...(c.messages || []), assistantMsg],
+          }
+        }),
+      )
+
+      // Call streaming API
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId: convId,
+          message: content,
+          model: conversation.model || selectedModel,
+          messages: conversation.messages?.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })) || [],
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.statusText}`)
+      }
+
+      // Handle streaming response
+      let fullContent = ''
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+
+      if (!reader) throw new Error('No response body')
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value, { stream: true })
+        const lines = chunk.split('\n').filter((line) => line.trim())
+
+        for (const line of lines) {
+          if (line.startsWith('0:')) {
+            try {
+              const data = JSON.parse(line.slice(2))
+              if (data.type === 'text-delta' && data.textDelta) {
+                fullContent += data.textDelta
+                // Update UI in real-time
+                setConversations((prev) =>
+                  prev.map((c) => {
+                    if (c.id !== convId) return c
+                    return {
+                      ...c,
+                      messages: c.messages?.map((m) =>
+                        m.id === assistantMsgId
+                          ? { ...m, content: fullContent }
+                          : m
+                      ) || [],
+                    }
+                  }),
+                )
+              }
+            } catch (e) {
+              // Ignore parse errors for malformed chunks
+            }
+          } else if (line.startsWith('d:')) {
+            // Handle data chunks
+            try {
+              const data = JSON.parse(line.slice(2))
+              if (data.type === 'text-delta' && data.textDelta) {
+                fullContent += data.textDelta
+                setConversations((prev) =>
+                  prev.map((c) => {
+                    if (c.id !== convId) return c
+                    return {
+                      ...c,
+                      messages: c.messages?.map((m) =>
+                        m.id === assistantMsgId
+                          ? { ...m, content: fullContent }
+                          : m
+                      ) || [],
+                    }
+                  }),
+                )
+              }
+            } catch (e) {
+              // Ignore parse errors
+            }
+          }
+        }
+      }
+
+      // Save complete message to database
+      await addMessageClient(convId, 'assistant', fullContent)
+      
+      setIsThinking(false)
+      setThinkingConvId(null)
+      setStreamingMessageId(null)
+    } catch (err) {
+      console.error('Error sending message:', err)
+      setError(err.message || 'Failed to send message')
+      setIsThinking(false)
+      setThinkingConvId(null)
+      setStreamingMessageId(null)
+      
+      // Remove failed assistant message
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== convId) return c
+          return {
+            ...c,
+            messages: c.messages?.filter((m) => m.id !== streamingMessageId) || [],
+          }
+        }),
+      )
+    }
   }
 
-  function editMessage(convId, messageId, newContent) {
-    const now = new Date().toISOString()
-    setConversations((prev) =>
-      prev.map((c) => {
-        if (c.id !== convId) return c
-        const msgs = (c.messages || []).map((m) =>
-          m.id === messageId ? { ...m, content: newContent, editedAt: now } : m,
-        )
-        return {
-          ...c,
-          messages: msgs,
-          preview: msgs[msgs.length - 1]?.content?.slice(0, 80) || c.preview,
-        }
-      }),
-    )
+  async function editMessage(convId, messageId, newContent) {
+    try {
+      await updateMessageClient(messageId, newContent)
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== convId) return c
+          const msgs = (c.messages || []).map((m) =>
+            m.id === messageId 
+              ? { ...m, content: newContent, edited_at: new Date().toISOString(), editedAt: new Date().toISOString() }
+              : m,
+          )
+          return {
+            ...c,
+            messages: msgs,
+            preview: msgs[msgs.length - 1]?.content?.slice(0, 80) || c.preview,
+          }
+        }),
+      )
+    } catch (err) {
+      console.error('Error editing message:', err)
+      setError(err.message || 'Failed to edit message')
+    }
   }
 
   function resendMessage(convId, messageId) {
@@ -233,17 +447,123 @@ export default function AIAssistantUI() {
     setThinkingConvId(null)
   }
 
+  async function handleDeleteFolder(folderId) {
+    try {
+      await deleteFolderClient(folderId)
+      setFolders((prev) => prev.filter((f) => f.id !== folderId))
+      // Remove folder from conversations
+      setConversations((prev) =>
+        prev.map((c) => (c.folder_id === folderId ? { ...c, folder_id: null } : c))
+      )
+    } catch (err) {
+      console.error('Error deleting folder:', err)
+      alert(err.message || 'Failed to delete folder')
+    }
+  }
+
+  async function handleRenameFolder(folderId, newName) {
+    try {
+      await updateFolderClient(folderId, newName)
+      setFolders((prev) =>
+        prev.map((f) => (f.id === folderId ? { ...f, name: newName } : f))
+      )
+    } catch (err) {
+      console.error('Error renaming folder:', err)
+      alert(err.message || 'Failed to rename folder')
+    }
+  }
+
+  async function handleCreateTemplate(templateData) {
+    if (!user) return
+    
+    try {
+      const newTemplate = await createTemplateClient(
+        user.id,
+        templateData.name,
+        templateData.content,
+        templateData.snippet
+      )
+      setTemplates((prev) => [...prev, newTemplate])
+    } catch (err) {
+      console.error('Error creating template:', err)
+      alert(err.message || 'Failed to create template')
+    }
+  }
+
+  async function handleUpdateTemplate(templateId, updates) {
+    try {
+      await updateTemplateClient(templateId, updates)
+      setTemplates((prev) =>
+        prev.map((t) => (t.id === templateId ? { ...t, ...updates } : t))
+      )
+    } catch (err) {
+      console.error('Error updating template:', err)
+      alert(err.message || 'Failed to update template')
+    }
+  }
+
+  async function handleDeleteTemplate(templateId) {
+    try {
+      await deleteTemplateClient(templateId)
+      setTemplates((prev) => prev.filter((t) => t.id !== templateId))
+    } catch (err) {
+      console.error('Error deleting template:', err)
+      alert(err.message || 'Failed to delete template')
+    }
+  }
+
   function handleUseTemplate(template) {
-    // This will be passed down to the Composer component
-    // The Composer will handle inserting the template content
     if (composerRef.current) {
       composerRef.current.insertTemplate(template.content)
+    }
+  }
+
+  function handleModelChange(model) {
+    setSelectedModel(model)
+    // Update current conversation's model if it exists
+    if (selectedId) {
+      updateConversationClient(selectedId, { model }).catch(console.error)
+      setConversations((prev) =>
+        prev.map((c) => (c.id === selectedId ? { ...c, model } : c))
+      )
     }
   }
 
   const composerRef = useRef(null)
 
   const selected = conversations.find((c) => c.id === selectedId) || null
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-zinc-50 dark:bg-zinc-950">
+        <div className="text-center">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-sm dark:from-zinc-200 dark:to-zinc-300 dark:text-zinc-900 mb-4">
+            <span className="text-xl">✱</span>
+          </div>
+          <p className="text-sm text-zinc-600 dark:text-zinc-400">Loading your conversations...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-zinc-50 dark:bg-zinc-950">
+        <div className="text-center">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-red-500 text-white shadow-sm mb-4">
+            <span className="text-xl">⚠</span>
+          </div>
+          <p className="text-sm text-red-600 dark:text-red-400 mb-4">{error}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="rounded-lg bg-zinc-900 px-4 py-2 text-sm text-white dark:bg-white dark:text-zinc-900"
+          >
+            Reload
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="h-screen w-full bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -291,10 +611,21 @@ export default function AIAssistantUI() {
           templates={templates}
           setTemplates={setTemplates}
           onUseTemplate={handleUseTemplate}
+          onDeleteFolder={handleDeleteFolder}
+          onRenameFolder={handleRenameFolder}
+          onCreateTemplate={handleCreateTemplate}
+          onUpdateTemplate={handleUpdateTemplate}
+          onDeleteTemplate={handleDeleteTemplate}
         />
 
         <main className="relative flex min-w-0 flex-1 flex-col">
-          <Header createNewChat={createNewChat} sidebarCollapsed={sidebarCollapsed} setSidebarOpen={setSidebarOpen} />
+          <Header 
+            createNewChat={createNewChat} 
+            sidebarCollapsed={sidebarCollapsed} 
+            setSidebarOpen={setSidebarOpen}
+            selectedModel={selectedModel}
+            onModelChange={handleModelChange}
+          />
           <ChatPane
             ref={composerRef}
             conversation={selected}

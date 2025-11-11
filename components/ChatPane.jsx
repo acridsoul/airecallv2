@@ -4,6 +4,7 @@ import { useState, forwardRef, useImperativeHandle, useRef } from "react"
 import { Pencil, RefreshCw, Check, X, Square } from "lucide-react"
 import Message from "./Message"
 import Composer from "./Composer"
+import MarkdownContent from "./MarkdownContent"
 import { cls, timeAgo } from "./utils"
 
 function ThinkingMessage({ onPause }) {
@@ -132,7 +133,11 @@ const ChatPane = forwardRef(function ChatPane(
                   </div>
                 ) : (
                   <Message role={m.role}>
-                    <div className="whitespace-pre-wrap">{m.content}</div>
+                    {m.role === "assistant" ? (
+                      <MarkdownContent content={m.content} />
+                    ) : (
+                      <div className="whitespace-pre-wrap">{m.content}</div>
+                    )}
                     {m.role === "user" && (
                       <div className="mt-1 flex gap-2 text-[11px] text-zinc-500">
                         <button className="inline-flex items-center gap-1 hover:underline" onClick={() => startEdit(m)}>

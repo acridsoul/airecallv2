@@ -11,6 +11,7 @@ import {
   FileText,
   Settings,
   Asterisk,
+  LogOut,
 } from "lucide-react"
 import SidebarSection from "./SidebarSection"
 import ConversationRow from "./ConversationRow"
@@ -23,6 +24,8 @@ import SearchModal from "./SearchModal"
 import SettingsPopover from "./SettingsPopover"
 import { cls } from "./utils"
 import { useState } from "react"
+import { useAuth } from "@/contexts/AuthContext"
+import { useRouter } from "next/navigation"
 
 export default function Sidebar({
   open,
@@ -49,47 +52,55 @@ export default function Sidebar({
   onUseTemplate = () => {},
   sidebarCollapsed = false,
   setSidebarCollapsed = () => {},
+  onDeleteFolder = () => {},
+  onRenameFolder = () => {},
+  onCreateTemplate = () => {},
+  onUpdateTemplate = () => {},
+  onDeleteTemplate = () => {},
 }) {
   const [showCreateFolderModal, setShowCreateFolderModal] = useState(false)
   const [showCreateTemplateModal, setShowCreateTemplateModal] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState(null)
   const [showSearchModal, setShowSearchModal] = useState(false)
+  const { user, signOut } = useAuth()
+  const router = useRouter()
 
-  const getConversationsByFolder = (folderName) => {
-    return conversations.filter((conv) => conv.folder === folderName)
+  const handleSignOut = async () => {
+    await signOut()
+    router.push("/login")
+  }
+
+  const getUserInitials = () => {
+    if (user?.email) {
+      return user.email.substring(0, 2).toUpperCase()
+    }
+    return "U"
+  }
+
+  const getUserDisplayName = () => {
+    if (user?.user_metadata?.full_name) {
+      return user.user_metadata.full_name
+    }
+    if (user?.email) {
+      return user.email.split("@")[0]
+    }
+    return "User"
+  }
+
+  const getConversationsByFolder = (folderId) => {
+    return conversations.filter((conv) => conv.folder_id === folderId)
   }
 
   const handleCreateFolder = (folderName) => {
     createFolder(folderName)
   }
 
-  const handleDeleteFolder = (folderName) => {
-    const updatedConversations = conversations.map((conv) =>
-      conv.folder === folderName ? { ...conv, folder: null } : conv,
-    )
-    console.log("Delete folder:", folderName, "Updated conversations:", updatedConversations)
-  }
-
-  const handleRenameFolder = (oldName, newName) => {
-    const updatedConversations = conversations.map((conv) =>
-      conv.folder === oldName ? { ...conv, folder: newName } : conv,
-    )
-    console.log("Rename folder:", oldName, "to", newName, "Updated conversations:", updatedConversations)
-  }
-
   const handleCreateTemplate = (templateData) => {
     if (editingTemplate) {
-      const updatedTemplates = templates.map((t) =>
-        t.id === editingTemplate.id ? { ...templateData, id: editingTemplate.id } : t,
-      )
-      setTemplates(updatedTemplates)
+      onUpdateTemplate(editingTemplate.id, templateData)
       setEditingTemplate(null)
     } else {
-      const newTemplate = {
-        ...templateData,
-        id: Date.now().toString(),
-      }
-      setTemplates([...templates, newTemplate])
+      onCreateTemplate(templateData)
     }
     setShowCreateTemplateModal(false)
   }
@@ -100,15 +111,11 @@ export default function Sidebar({
   }
 
   const handleRenameTemplate = (templateId, newName) => {
-    const updatedTemplates = templates.map((t) =>
-      t.id === templateId ? { ...t, name: newName, updatedAt: new Date().toISOString() } : t,
-    )
-    setTemplates(updatedTemplates)
+    onUpdateTemplate(templateId, { name: newName })
   }
 
   const handleDeleteTemplate = (templateId) => {
-    const updatedTemplates = templates.filter((t) => t.id !== templateId)
-    setTemplates(updatedTemplates)
+    onDeleteTemplate(templateId)
   }
 
   const handleUseTemplate = (template) => {
@@ -323,14 +330,15 @@ export default function Sidebar({
                   {folders.map((f) => (
                     <FolderRow
                       key={f.id}
+                      folderId={f.id}
                       name={f.name}
-                      count={folderCounts[f.name] || 0}
-                      conversations={getConversationsByFolder(f.name)}
+                      count={folderCounts[f.id] || 0}
+                      conversations={getConversationsByFolder(f.id)}
                       selectedId={selectedId}
                       onSelect={onSelect}
                       togglePin={togglePin}
-                      onDeleteFolder={handleDeleteFolder}
-                      onRenameFolder={handleRenameFolder}
+                      onDeleteFolder={() => onDeleteFolder(f.id)}
+                      onRenameFolder={(newName) => onRenameFolder(f.id, newName)}
                     />
                   ))}
                 </div>
@@ -383,12 +391,22 @@ export default function Sidebar({
               </div>
               <div className="mt-2 flex items-center gap-2 rounded-xl bg-zinc-50 p-2 dark:bg-zinc-800/60">
                 <div className="grid h-8 w-8 place-items-center rounded-full bg-zinc-900 text-xs font-bold text-white dark:bg-white dark:text-zinc-900">
-                  JD
+                  {getUserInitials()}
                 </div>
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">John Doe</div>
-                  <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">Pro workspace</div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">{getUserDisplayName()}</div>
+                  <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+                    {user?.email || "User"}
+                  </div>
                 </div>
+                <button
+                  onClick={handleSignOut}
+                  className="rounded-lg p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400"
+                  title="Sign out"
+                  aria-label="Sign out"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
               </div>
             </div>
           </motion.aside>

@@ -6,6 +6,7 @@ import ConversationRow from "./ConversationRow"
 import { motion, AnimatePresence } from "framer-motion"
 
 export default function FolderRow({
+  folderId,
   name,
   count,
   conversations = [],
@@ -42,7 +43,7 @@ export default function FolderRow({
   const handleRename = () => {
     const newName = prompt(`Rename folder "${name}" to:`, name)
     if (newName && newName.trim() && newName !== name) {
-      onRenameFolder?.(name, newName.trim())
+      onRenameFolder?.(newName.trim())
     }
     setShowMenu(false)
   }
@@ -53,7 +54,7 @@ export default function FolderRow({
         `Are you sure you want to delete the folder "${name}"? This will move all conversations to the root level.`,
       )
     ) {
-      onDeleteFolder?.(name)
+      onDeleteFolder?.()
     }
     setShowMenu(false)
   }
