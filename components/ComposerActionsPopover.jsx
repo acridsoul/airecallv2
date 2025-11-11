@@ -3,7 +3,7 @@ import { useState } from "react"
 import { Paperclip, Bot, Search, Palette, BookOpen, MoreHorizontal, Globe, ChevronRight } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover"
 
-export default function ComposerActionsPopover({ children }) {
+export default function ComposerActionsPopover({ children, onFileUploadClick }) {
   const [open, setOpen] = useState(false)
   const [showMore, setShowMore] = useState(false)
 
@@ -11,7 +11,9 @@ export default function ComposerActionsPopover({ children }) {
     {
       icon: Paperclip,
       label: "Add photos & files",
-      action: () => console.log("Add photos & files"),
+      action: () => {
+        onFileUploadClick?.()
+      },
     },
     {
       icon: Bot,

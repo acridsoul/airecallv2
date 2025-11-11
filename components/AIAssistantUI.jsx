@@ -178,6 +178,19 @@ export default function AIAssistantUI() {
     }
   }, [conversations])
 
+  // Sync selectedModel with conversation's model when switching conversations
+  useEffect(() => {
+    if (selectedId && conversations.length > 0) {
+      const conv = conversations.find((c) => c.id === selectedId)
+      if (conv?.model) {
+        setSelectedModel(conv.model)
+      } else {
+        // Default to DeepSeek if conversation has no model set
+        setSelectedModel('DeepSeek')
+      }
+    }
+  }, [selectedId, conversations])
+
   const filtered = useMemo(() => {
     if (!query.trim()) return conversations
     const q = query.toLowerCase()
@@ -242,33 +255,39 @@ export default function AIAssistantUI() {
     }
   }
 
-  async function sendMessage(convId, content) {
-    if (!content.trim() || !user) return
+  async function sendMessage(convId, content, files = []) {
+    if ((!content || !content.trim()) && (!files || files.length === 0) || !user) return
     
     const conversation = conversations.find((c) => c.id === convId)
     if (!conversation) return
 
     try {
-      // Save user message to database
-      const userMsg = await addMessageClient(convId, 'user', content)
+      // Save user message to database (files will be stored in content or separate field)
+      const userMsg = await addMessageClient(convId, 'user', content || '')
       
+      // Add files to user message if present
+      const userMsgWithFiles = files.length > 0 
+        ? { ...userMsg, files }
+        : userMsg
+
       // Update UI optimistically
       setConversations((prev) =>
         prev.map((c) => {
           if (c.id !== convId) return c
-          const msgs = [...(c.messages || []), userMsg]
+          const msgs = [...(c.messages || []), userMsgWithFiles]
           return {
             ...c,
             messages: msgs,
             messageCount: msgs.length,
-            preview: content.slice(0, 80),
+            preview: (content || '').slice(0, 80) || (files.length > 0 ? `📎 ${files.length} file(s)` : ''),
           }
         }),
       )
 
       // Generate title from first message if it's still "New Chat"
       if (conversation.title === "New Chat" && conversation.messages?.length === 0) {
-        const title = content.slice(0, 50) + (content.length > 50 ? '...' : '')
+        const title = (content || '').slice(0, 50) + ((content || '').length > 50 ? '...' : '') || 
+                      (files.length > 0 ? `📎 ${files.length} file(s)` : 'New Chat')
         await updateConversationClient(convId, { title })
         setConversations((prev) =>
           prev.map((c) => (c.id === convId ? { ...c, title } : c))
@@ -301,23 +320,47 @@ export default function AIAssistantUI() {
         }),
       )
 
+      // Get conversation messages BEFORE adding the placeholder assistant message
+      // This ensures we don't include the empty placeholder in the API request
+      const conversationBeforePlaceholder = conversations.find((c) => c.id === convId)
+      const messagesToSend = (conversationBeforePlaceholder?.messages || [])
+        .filter((m) => {
+          // Filter out empty assistant messages (placeholders)
+          if (m.role === 'assistant' && (!m.content || !m.content.trim())) {
+            return false
+          }
+          // Include messages with content or files
+          return (m.content && m.content.trim()) || (m.files && m.files.length > 0)
+        })
+        .map((m) => ({
+          role: m.role,
+          content: m.content || '',
+          files: m.files || undefined,
+        }))
+
       // Call streaming API
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           conversationId: convId,
-          message: content,
+          message: content || '',
           model: conversation.model || selectedModel,
-          messages: conversation.messages?.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })) || [],
+          files: files.length > 0 ? files : undefined,
+          messages: messagesToSend,
         }),
       })
 
       if (!response.ok) {
-        throw new Error(`API error: ${response.statusText}`)
+        const errorData = await response.json().catch(() => ({ error: response.statusText }))
+        throw new Error(errorData.error || `API error: ${response.statusText}`)
+      }
+
+      // Check if response is JSON (error) or stream
+      const contentType = response.headers.get('content-type')
+      if (contentType?.includes('application/json')) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Unknown API error')
       }
 
       // Handle streaming response
@@ -335,6 +378,7 @@ export default function AIAssistantUI() {
         const lines = chunk.split('\n').filter((line) => line.trim())
 
         for (const line of lines) {
+          // Handle Vercel AI SDK data stream format: 0:{"type":"text-delta","textDelta":"..."}
           if (line.startsWith('0:')) {
             try {
               const data = JSON.parse(line.slice(2))
@@ -354,12 +398,19 @@ export default function AIAssistantUI() {
                     }
                   }),
                 )
+              } else if (data.type === 'error') {
+                throw new Error(data.error || 'Unknown error occurred')
               }
             } catch (e) {
-              // Ignore parse errors for malformed chunks
+              // If it's an error object, throw it
+              if (e && e.message && e.message !== 'Unexpected token' && !e.message.includes('JSON')) {
+                throw e
+              }
+              // Otherwise ignore parse errors for malformed chunks
             }
-          } else if (line.startsWith('d:')) {
-            // Handle data chunks
+          } 
+          // Handle data chunks: d:{"type":"text-delta","textDelta":"..."}
+          else if (line.startsWith('d:')) {
             try {
               const data = JSON.parse(line.slice(2))
               if (data.type === 'text-delta' && data.textDelta) {
@@ -377,16 +428,88 @@ export default function AIAssistantUI() {
                     }
                   }),
                 )
+              } else if (data.type === 'error') {
+                throw new Error(data.error || 'Unknown error occurred')
+              } else if (data.type === 'done') {
+                // Stream completed
+                break
               }
             } catch (e) {
-              // Ignore parse errors
+              // If it's an error object, throw it
+              if (e && e.message && e.message !== 'Unexpected token' && !e.message.includes('JSON')) {
+                throw e
+              }
+              // Otherwise ignore parse errors
+            }
+          } 
+          // Handle error chunks: e:{"type":"error","error":"..."}
+          else if (line.startsWith('e:')) {
+            try {
+              const data = JSON.parse(line.slice(2))
+              throw new Error(data.error || 'Streaming error occurred')
+            } catch (e) {
+              throw (e && e.message) ? e : new Error('Unknown streaming error')
+            }
+          }
+          // Handle plain text chunks (fallback for some formats)
+          else if (line.trim() && !line.startsWith('0:') && !line.startsWith('d:') && !line.startsWith('e:')) {
+            // Try to parse as JSON, if not, treat as plain text
+            try {
+              const data = JSON.parse(line)
+              if (data.type === 'text-delta' && data.textDelta) {
+                fullContent += data.textDelta
+                setConversations((prev) =>
+                  prev.map((c) => {
+                    if (c.id !== convId) return c
+                    return {
+                      ...c,
+                      messages: c.messages?.map((m) =>
+                        m.id === assistantMsgId
+                          ? { ...m, content: fullContent }
+                          : m
+                      ) || [],
+                    }
+                  }),
+                )
+              }
+            } catch (e) {
+              // Not JSON, might be plain text - add it
+              if (line.trim()) {
+                fullContent += line
+                setConversations((prev) =>
+                  prev.map((c) => {
+                    if (c.id !== convId) return c
+                    return {
+                      ...c,
+                      messages: c.messages?.map((m) =>
+                        m.id === assistantMsgId
+                          ? { ...m, content: fullContent }
+                          : m
+                      ) || [],
+                    }
+                  }),
+                )
+              }
             }
           }
         }
       }
 
-      // Save complete message to database
-      await addMessageClient(convId, 'assistant', fullContent)
+      // Save complete message to database only if we have content
+      if (fullContent && fullContent.trim()) {
+        await addMessageClient(convId, 'assistant', fullContent)
+      } else {
+        // If no content was received, remove the placeholder assistant message
+        setConversations((prev) =>
+          prev.map((c) => {
+            if (c.id !== convId) return c
+            return {
+              ...c,
+              messages: c.messages?.filter((m) => m.id !== assistantMsgId) || [],
+            }
+          }),
+        )
+      }
       
       setIsThinking(false)
       setThinkingConvId(null)
@@ -629,7 +752,7 @@ export default function AIAssistantUI() {
           <ChatPane
             ref={composerRef}
             conversation={selected}
-            onSend={(content) => selected && sendMessage(selected.id, content)}
+            onSend={(content, files) => selected && sendMessage(selected.id, content, files)}
             onEditMessage={(messageId, newContent) => selected && editMessage(selected.id, messageId, newContent)}
             onResendMessage={(messageId) => selected && resendMessage(selected.id, messageId)}
             isThinking={isThinking && thinkingConvId === selected?.id}
@@ -640,3 +763,4 @@ export default function AIAssistantUI() {
     </div>
   )
 }
+
