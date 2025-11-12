@@ -14,7 +14,7 @@ export default function Header({
 
   const models = [
     { name: "DeepSeek", icon: "🔍" },
-    { name: "Claude Sonnet 4", icon: "🎭" },
+    { name: "Claude Haiku 4.5", icon: "🎭" },
     { name: "Gemini", icon: "💎" },
   ]
 

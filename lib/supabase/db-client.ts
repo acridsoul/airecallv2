@@ -1,7 +1,7 @@
 "use client"
 
 import { createClient } from './client'
-import type { Conversation, Message, Folder, Template } from './db'
+import type { Conversation, Message, Folder, Template, Category } from './db'
 
 // Client-side database functions (for use in components)
 const supabase = createClient()
@@ -28,6 +28,8 @@ export async function getConversationsClient(userId: string): Promise<Conversati
     ...conv,
     messages: conv.messages || [],
     message_count: conv.messages?.length || 0,
+    category_id: conv.category_id || null,
+    auto_categorized: conv.auto_categorized || false,
     updatedAt: conv.updated_at,
     createdAt: conv.created_at,
   }))
@@ -64,11 +66,20 @@ export async function createConversationClient(
 
 export async function updateConversationClient(
   conversationId: string,
-  updates: Partial<Pick<Conversation, 'title' | 'preview' | 'pinned' | 'folder_id' | 'model'>>
+  updates: Partial<Pick<Conversation, 'title' | 'preview' | 'pinned' | 'folder_id' | 'model' | 'category_id' | 'auto_categorized'>>
 ): Promise<void> {
   const { error } = await supabase
     .from('conversations')
     .update(updates)
+    .eq('id', conversationId)
+
+  if (error) throw error
+}
+
+export async function deleteConversationClient(conversationId: string): Promise<void> {
+  const { error } = await supabase
+    .from('conversations')
+    .delete()
     .eq('id', conversationId)
 
   if (error) throw error
@@ -242,6 +253,93 @@ export async function deleteTemplateClient(templateId: string): Promise<void> {
     .from('templates')
     .delete()
     .eq('id', templateId)
+
+  if (error) throw error
+}
+
+// Categories
+export async function getCategoriesClient(userId: string): Promise<Category[]> {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('*')
+    .eq('user_id', userId)
+    .order('name', { ascending: true })
+
+  if (error) throw error
+
+  return (data || []).map((c: any) => ({
+    ...c,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+  }))
+}
+
+export async function createCategoryClient(userId: string, name: string): Promise<Category> {
+  const { data, error } = await supabase
+    .from('categories')
+    .insert({
+      user_id: userId,
+      name,
+    })
+    .select()
+    .single()
+
+  if (error) {
+    if (error.code === '23505') {
+      throw new Error('Category already exists')
+    }
+    throw error
+  }
+
+  return {
+    ...data,
+    createdAt: data.created_at,
+    updatedAt: data.updated_at,
+  }
+}
+
+export async function updateCategoryClient(categoryId: string, name: string): Promise<void> {
+  const { error } = await supabase
+    .from('categories')
+    .update({ name })
+    .eq('id', categoryId)
+
+  if (error) {
+    if (error.code === '23505') {
+      throw new Error('Category name already exists')
+    }
+    throw error
+  }
+}
+
+export async function deleteCategoryClient(categoryId: string): Promise<void> {
+  // First, set all conversations with this category to null
+  await supabase
+    .from('conversations')
+    .update({ category_id: null })
+    .eq('category_id', categoryId)
+  
+  // Then delete the category
+  const { error } = await supabase
+    .from('categories')
+    .delete()
+    .eq('id', categoryId)
+
+  if (error) throw error
+}
+
+export async function updateConversationCategoryClient(
+  conversationId: string,
+  categoryId: string | null,
+  autoCategorized: boolean = false
+): Promise<void> {
+  const { error } = await supabase
+    .from('conversations')
+    .update({
+      category_id: categoryId,
+      auto_categorized: autoCategorized,
+    })
+    .eq('id', conversationId)
 
   if (error) throw error
 }

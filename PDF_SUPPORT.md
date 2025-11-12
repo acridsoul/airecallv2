@@ -6,7 +6,7 @@ Your AI chatbot now has **full PDF processing support** across all AI models (De
 ## How It Works
 
 ### 📄 PDF Text Extraction
-- PDFs are automatically processed server-side using the `pdf-parse` library
+- PDFs are automatically processed server-side using the `pdfjs-dist` library (Mozilla's PDF.js)
 - Text content is extracted and sent to AI models that don't natively support PDFs
 - This enables all models to analyze and understand PDF documents
 
@@ -22,10 +22,10 @@ Your AI chatbot now has **full PDF processing support** across all AI models (De
 - ✅ **Images**: Fully supported (PNG, JPG, JPEG)
 - PDF text is extracted and combined with any accompanying message text
 
-#### **Gemini 2.5 Flash** (Multimodal + Native PDF)
-- ✅ **PDFs**: Natively supported (sent as file attachments)
+#### **Gemini 2.5 Flash** (Multimodal)
+- ✅ **PDFs**: Supported via text extraction
 - ✅ **Images**: Fully supported (PNG, JPG, JPEG)
-- Uses Google's native PDF processing capabilities
+- PDF text is extracted using the same reliable method as other models
 
 ## Technical Changes
 
@@ -39,8 +39,8 @@ export const runtime = 'nodejs'
 ```typescript
 async function extractPdfText(dataUrl: string): Promise<string>
 ```
-- Converts base64 data URLs to Buffer
-- Extracts text using pdf-parse library
+- Converts base64 data URLs to Uint8Array
+- Extracts text using pdfjs-dist library (page by page)
 - Returns extracted text or error message
 
 ### 3. Message Processing
@@ -48,13 +48,14 @@ async function extractPdfText(dataUrl: string): Promise<string>
 - **Current message**: New PDF uploads are processed in real-time
 - **Format**: `[PDF Document: filename.pdf]\n\n{extracted_text}`
 
-### 4. Smart Model Detection
+### 4. Unified PDF Processing
 ```typescript
-if (model === 'Gemini') {
-  // Use native PDF support
-} else {
-  // Extract text for DeepSeek and Claude
-}
+// All models use text extraction for maximum compatibility
+const pdfText = await extractPdfText(file.data)
+contentParts.push({
+  type: 'text',
+  text: `[PDF Document: ${file.filename}]\n\n${pdfText}`
+})
 ```
 
 ## Usage
@@ -140,8 +141,8 @@ Potential improvements:
 
 ## Dependencies
 
-- **pdf-parse**: ^2.4.5 - PDF text extraction library
-- **Node.js runtime**: Required for pdf-parse (changed from edge)
+- **pdfjs-dist**: ^5.4.394 - Mozilla's PDF.js library for text extraction
+- **Node.js runtime**: Required for pdfjs-dist (changed from edge)
 
 ---
 

@@ -12,16 +12,11 @@ import {
   getConversationsClient, 
   createConversationClient, 
   updateConversationClient,
+  deleteConversationClient,
   addMessageClient,
   updateMessageClient,
-  getFoldersClient,
-  createFolderClient,
-  updateFolderClient,
-  deleteFolderClient,
-  getTemplatesClient,
-  createTemplateClient,
-  updateTemplateClient,
-  deleteTemplateClient
+  getCategoriesClient,
+  updateConversationCategoryClient
 } from "@/lib/supabase/db-client"
 
 export default function AIAssistantUI() {
@@ -74,9 +69,9 @@ export default function AIAssistantUI() {
   const [collapsed, setCollapsed] = useState(() => {
     try {
       const raw = localStorage.getItem("sidebar-collapsed")
-      return raw ? JSON.parse(raw) : { pinned: true, recent: false, folders: true, templates: true }
+      return raw ? JSON.parse(raw) : { pinned: true, recent: false }
     } catch {
-      return { pinned: true, recent: false, folders: true, templates: true }
+      return { pinned: true, recent: false }
     }
   })
   useEffect(() => {
@@ -102,8 +97,7 @@ export default function AIAssistantUI() {
 
   const [conversations, setConversations] = useState([])
   const [selectedId, setSelectedId] = useState(null)
-  const [templates, setTemplates] = useState([])
-  const [folders, setFolders] = useState([])
+  const [categories, setCategories] = useState([])
   const [selectedModel, setSelectedModel] = useState("DeepSeek")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -142,15 +136,20 @@ export default function AIAssistantUI() {
       try {
         setLoading(true)
         setError(null)
-        const [convs, folds, temps] = await Promise.all([
+        const [convs, cats] = await Promise.all([
           getConversationsClient(user.id),
-          getFoldersClient(user.id),
-          getTemplatesClient(user.id),
+          getCategoriesClient(user.id),
         ])
         
-        setConversations(convs)
-        setFolders(folds)
-        setTemplates(temps)
+        // Map conversations to ensure category_id and auto_categorized are included
+        setConversations(convs.map((conv) => ({
+          ...conv,
+          category_id: conv.category_id || null,
+          auto_categorized: conv.auto_categorized || false,
+          updatedAt: conv.updated_at || conv.updatedAt,
+          createdAt: conv.created_at || conv.createdAt,
+        })))
+        setCategories(cats)
         
         // Select first conversation or create new one
         if (convs.length > 0 && !selectedId) {
@@ -197,22 +196,15 @@ export default function AIAssistantUI() {
     return conversations.filter((c) => c.title.toLowerCase().includes(q) || c.preview.toLowerCase().includes(q))
   }, [conversations, query])
 
+  // Keep pinned for backward compatibility but it's now handled in categories
   const pinned = filtered.filter((c) => c.pinned).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
 
+  // Keep recent for backward compatibility but it's now handled in categories
   const recent = filtered
     .filter((c) => !c.pinned)
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
     .slice(0, 10)
 
-  const folderCounts = React.useMemo(() => {
-    const map = Object.fromEntries(folders.map((f) => [f.id, 0]))
-    for (const c of conversations) {
-      if (c.folder_id && map[c.folder_id] != null) {
-        map[c.folder_id] += 1
-      }
-    }
-    return map
-  }, [conversations, folders])
 
   async function togglePin(id) {
     const conv = conversations.find((c) => c.id === id)
@@ -238,20 +230,6 @@ export default function AIAssistantUI() {
     } catch (err) {
       console.error('Error creating conversation:', err)
       setError(err.message || 'Failed to create conversation')
-    }
-  }
-
-  async function createFolder() {
-    if (!user) return
-    
-    const name = prompt("Folder name")
-    if (!name) return
-    
-    try {
-      const newFolder = await createFolderClient(user.id, name)
-      setFolders((prev) => [...prev, newFolder])
-    } catch (err) {
-      alert(err.message || 'Failed to create folder')
     }
   }
 
@@ -498,6 +476,54 @@ export default function AIAssistantUI() {
       // Save complete message to database only if we have content
       if (fullContent && fullContent.trim()) {
         await addMessageClient(convId, 'assistant', fullContent)
+        
+        // Update conversation state - ensure message is properly saved (don't duplicate)
+        setConversations((prev) => {
+          const updated = prev.map((c) => {
+            if (c.id !== convId) return c
+            
+            // Check if message already exists (from streaming updates)
+            const existingMessageIndex = c.messages?.findIndex((m) => m.id === assistantMsgId) ?? -1
+            const updatedMessages = existingMessageIndex >= 0
+              ? c.messages.map((m, idx) => 
+                  idx === existingMessageIndex 
+                    ? { ...m, content: fullContent } // Update existing message
+                    : m
+                )
+              : [...(c.messages || []), {
+                  id: assistantMsgId,
+                  conversation_id: convId,
+                  role: 'assistant',
+                  content: fullContent,
+                  created_at: new Date().toISOString(),
+                  edited_at: null,
+                }]
+            
+            const updatedConv = {
+              ...c,
+              messages: updatedMessages,
+              messageCount: updatedMessages.length,
+            }
+            
+            // Check if we should trigger categorization (after 2 messages)
+            const messageCount = updatedMessages.length
+            
+            // Trigger categorization if:
+            // 1. We have 2+ messages total
+            // 2. Conversation doesn't have a category yet
+            if (messageCount >= 2 && !updatedConv.category_id) {
+              // Trigger categorization asynchronously (don't block UI)
+              triggerCategorization(convId, conversation.model || selectedModel, updatedMessages).catch((err) => {
+                console.error('Error categorizing conversation:', err)
+                // Don't show error to user, categorization is non-critical
+              })
+            }
+            
+            return updatedConv
+          })
+          
+          return updated
+        })
       } else {
         // If no content was received, remove the placeholder assistant message
         setConversations((prev) =>
@@ -570,77 +596,6 @@ export default function AIAssistantUI() {
     setThinkingConvId(null)
   }
 
-  async function handleDeleteFolder(folderId) {
-    try {
-      await deleteFolderClient(folderId)
-      setFolders((prev) => prev.filter((f) => f.id !== folderId))
-      // Remove folder from conversations
-      setConversations((prev) =>
-        prev.map((c) => (c.folder_id === folderId ? { ...c, folder_id: null } : c))
-      )
-    } catch (err) {
-      console.error('Error deleting folder:', err)
-      alert(err.message || 'Failed to delete folder')
-    }
-  }
-
-  async function handleRenameFolder(folderId, newName) {
-    try {
-      await updateFolderClient(folderId, newName)
-      setFolders((prev) =>
-        prev.map((f) => (f.id === folderId ? { ...f, name: newName } : f))
-      )
-    } catch (err) {
-      console.error('Error renaming folder:', err)
-      alert(err.message || 'Failed to rename folder')
-    }
-  }
-
-  async function handleCreateTemplate(templateData) {
-    if (!user) return
-    
-    try {
-      const newTemplate = await createTemplateClient(
-        user.id,
-        templateData.name,
-        templateData.content,
-        templateData.snippet
-      )
-      setTemplates((prev) => [...prev, newTemplate])
-    } catch (err) {
-      console.error('Error creating template:', err)
-      alert(err.message || 'Failed to create template')
-    }
-  }
-
-  async function handleUpdateTemplate(templateId, updates) {
-    try {
-      await updateTemplateClient(templateId, updates)
-      setTemplates((prev) =>
-        prev.map((t) => (t.id === templateId ? { ...t, ...updates } : t))
-      )
-    } catch (err) {
-      console.error('Error updating template:', err)
-      alert(err.message || 'Failed to update template')
-    }
-  }
-
-  async function handleDeleteTemplate(templateId) {
-    try {
-      await deleteTemplateClient(templateId)
-      setTemplates((prev) => prev.filter((t) => t.id !== templateId))
-    } catch (err) {
-      console.error('Error deleting template:', err)
-      alert(err.message || 'Failed to delete template')
-    }
-  }
-
-  function handleUseTemplate(template) {
-    if (composerRef.current) {
-      composerRef.current.insertTemplate(template.content)
-    }
-  }
-
   function handleModelChange(model) {
     setSelectedModel(model)
     // Update current conversation's model if it exists
@@ -649,6 +604,112 @@ export default function AIAssistantUI() {
       setConversations((prev) =>
         prev.map((c) => (c.id === selectedId ? { ...c, model } : c))
       )
+    }
+  }
+
+  // Trigger AI categorization
+  async function triggerCategorization(conversationId, model, messages) {
+    try {
+      const response = await fetch('/api/categorize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId,
+          model,
+          messages: messages.map((m) => ({
+            role: m.role,
+            content: m.content || '',
+          })),
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: response.statusText }))
+        throw new Error(errorData.error || `Failed to categorize conversation: ${response.status} ${response.statusText}`)
+      }
+
+      const result = await response.json()
+      
+      // Update conversation with new category
+      if (result.category) {
+        await updateConversationCategoryClient(conversationId, result.category.id, true)
+        
+        // Update local state
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === conversationId
+              ? { ...c, category_id: result.category.id, auto_categorized: true }
+              : c
+          )
+        )
+        
+        // Reload categories to get the new one if it was created
+        if (user) {
+          const updatedCategories = await getCategoriesClient(user.id)
+          setCategories(updatedCategories)
+        }
+      }
+    } catch (err) {
+      console.error('Categorization error:', err)
+      // Silently fail - categorization is non-critical
+    }
+  }
+
+  // Handle manual category change
+  async function handleCategoryChange(conversationId, categoryId) {
+    try {
+      await updateConversationCategoryClient(conversationId, categoryId, false)
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? { ...c, category_id: categoryId, auto_categorized: false }
+            : c
+        )
+      )
+    } catch (err) {
+      console.error('Error updating category:', err)
+      alert(err.message || 'Failed to update category')
+    }
+  }
+
+  // Handle conversation rename
+  async function handleRenameConversation(conversationId, newTitle) {
+    try {
+      await updateConversationClient(conversationId, { title: newTitle })
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId ? { ...c, title: newTitle } : c
+        )
+      )
+    } catch (err) {
+      console.error('Error renaming conversation:', err)
+      alert(err.message || 'Failed to rename conversation')
+    }
+  }
+
+  // Handle conversation delete
+  async function handleDeleteConversation(conversationId) {
+    try {
+      await deleteConversationClient(conversationId)
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId))
+      
+      // If deleted conversation was selected, select another one or create new
+      if (selectedId === conversationId) {
+        const remaining = conversations.filter((c) => c.id !== conversationId)
+        if (remaining.length > 0) {
+          setSelectedId(remaining[0].id)
+        } else if (user) {
+          // Create a new chat if no conversations remain
+          const newConv = await createConversationClient(user.id, "New Chat", selectedModel)
+          setConversations([newConv])
+          setSelectedId(newConv.id)
+        } else {
+          setSelectedId(null)
+        }
+      }
+    } catch (err) {
+      console.error('Error deleting conversation:', err)
+      alert(err.message || 'Failed to delete conversation')
     }
   }
 
@@ -721,24 +782,17 @@ export default function AIAssistantUI() {
           conversations={conversations}
           pinned={pinned}
           recent={recent}
-          folders={folders}
-          folderCounts={folderCounts}
+          categories={categories}
           selectedId={selectedId}
           onSelect={(id) => setSelectedId(id)}
           togglePin={togglePin}
           query={query}
           setQuery={setQuery}
           searchRef={searchRef}
-          createFolder={createFolder}
           createNewChat={createNewChat}
-          templates={templates}
-          setTemplates={setTemplates}
-          onUseTemplate={handleUseTemplate}
-          onDeleteFolder={handleDeleteFolder}
-          onRenameFolder={handleRenameFolder}
-          onCreateTemplate={handleCreateTemplate}
-          onUpdateTemplate={handleUpdateTemplate}
-          onDeleteTemplate={handleDeleteTemplate}
+          onCategoryChange={handleCategoryChange}
+          onRenameConversation={handleRenameConversation}
+          onDeleteConversation={handleDeleteConversation}
         />
 
         <main className="relative flex min-w-0 flex-1 flex-col">
@@ -757,6 +811,9 @@ export default function AIAssistantUI() {
             onResendMessage={(messageId) => selected && resendMessage(selected.id, messageId)}
             isThinking={isThinking && thinkingConvId === selected?.id}
             onPauseThinking={pauseThinking}
+            categories={categories}
+            onCategoryChange={handleCategoryChange}
+            userId={user?.id}
           />
         </main>
       </div>

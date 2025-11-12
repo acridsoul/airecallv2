@@ -4,7 +4,7 @@ import { createAnthropic } from '@ai-sdk/anthropic'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createClient } from '@/lib/supabase/server'
 
-// Note: Changed from 'edge' to 'nodejs' to support PDF parsing with pdf-parse
+// Note: Changed from 'edge' to 'nodejs' to support PDF parsing with pdfjs-dist
 export const runtime = 'nodejs'
 
 const deepseek = createDeepSeek({
@@ -19,26 +19,37 @@ const google = createGoogleGenerativeAI({
   apiKey: process.env.GOOGLE_GEMINI_API_KEY,
 })
 
-// Helper function to extract text from PDF
+// Helper function to extract text from PDF using pdfjs-dist
 async function extractPdfText(dataUrl: string): Promise<string> {
   try {
-    // Dynamic import for pdf-parse (CommonJS module)
-    // @ts-ignore - pdf-parse has complex export structure
-    const pdfParseModule: any = await import('pdf-parse')
-    // pdf-parse exports the function directly or as default
-    const pdfParse = pdfParseModule.default || pdfParseModule || (pdfParseModule as any).pdfParse
-    
-    if (typeof pdfParse !== 'function') {
-      throw new Error('pdf-parse module not loaded correctly')
-    }
-    
+    // Import pdfjs-dist legacy build for Node.js compatibility
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs')
+
     // Remove data URL prefix to get base64 data
     const base64Data = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
-    // Convert base64 to buffer
-    const pdfBuffer = Buffer.from(base64Data, 'base64')
-    // Extract text from PDF
-    const data = await pdfParse(pdfBuffer)
-    return data.text || ''
+
+    // Convert base64 to Uint8Array (pdfjs-dist expects this format)
+    const pdfData = Uint8Array.from(Buffer.from(base64Data, 'base64'))
+
+    // Load the PDF document
+    const loadingTask = pdfjsLib.getDocument({ data: pdfData })
+    const pdf = await loadingTask.promise
+
+    // Extract text from all pages
+    const textParts: string[] = []
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum)
+      const textContent = await page.getTextContent()
+      const pageText = textContent.items
+        .map((item: any) => item.str)
+        .join(' ')
+      textParts.push(pageText)
+    }
+
+    const fullText = textParts.join('\n\n')
+
+    return fullText.trim() || '[PDF appears to be empty or contains no extractable text]'
   } catch (error: any) {
     console.error('PDF text extraction error:', error)
     return `[PDF text extraction failed: ${error.message || 'Unknown error'}]`
@@ -76,20 +87,20 @@ export async function POST(req: Request) {
         modelProvider = deepseek
         modelName = 'deepseek-chat'
         break
-      case 'Claude Sonnet 4':
+      case 'Claude Haiku 4.5':
         modelProvider = anthropic
-        modelName = 'claude-sonnet-4-5-20250929'
+        modelName = 'claude-haiku-4-5-20251001'
         break
       case 'Gemini':
         modelProvider = google
         modelName = 'gemini-2.5-flash'
         break
       default:
-        return new Response('Invalid model', { status: 400 })
+        return new Response(`Invalid model: ${model}`, { status: 400 })
     }
 
     // Check if model supports multimodal (files/images)
-    const supportsMultimodal = model === 'Claude Sonnet 4' || model === 'Gemini'
+    const supportsMultimodal = model === 'Claude Haiku 4.5' || model === 'Gemini'
     
     // Check if DeepSeek is being used with image files (not supported)
     if (model === 'DeepSeek' && files && files.length > 0) {
@@ -97,7 +108,7 @@ export async function POST(req: Request) {
       if (hasImages) {
         return new Response(
           JSON.stringify({ 
-            error: `${model} does not support image uploads. However, PDFs are supported via text extraction. Please use Claude Sonnet 4 or Gemini for image processing.` 
+            error: `${model} does not support image uploads. However, PDFs are supported via text extraction. Please use Claude Haiku 4.5 or Gemini for image processing.` 
           }),
           { 
             status: 400,
@@ -119,7 +130,7 @@ export async function POST(req: Request) {
         }
       )
     }
-    if (model === 'Claude Sonnet 4' && !process.env.ANTHROPIC_API_KEY) {
+    if (model === 'Claude Haiku 4.5' && !process.env.ANTHROPIC_API_KEY) {
       return new Response(
         JSON.stringify({ 
           error: 'Anthropic API key not configured. Please add ANTHROPIC_API_KEY to your .env.local file.' 
@@ -185,26 +196,18 @@ export async function POST(req: Request) {
                     image: file.data,
                   })
                 } else if (file.mediaType === 'application/pdf') {
-                  // Extract PDF text for models that don't natively support PDFs
-                  if (model === 'DeepSeek' || model === 'Claude Sonnet 4') {
-                    try {
-                      const pdfText = await extractPdfText(file.data)
-                      contentParts.push({
-                        type: 'text',
-                        text: `[PDF Document: ${file.filename}]\n\n${pdfText}`,
-                      })
-                    } catch (pdfError) {
-                      console.error('Error extracting PDF text:', pdfError)
-                      contentParts.push({
-                        type: 'text',
-                        text: `[PDF Document: ${file.filename} - text extraction failed]`,
-                      })
-                    }
-                  } else if (model === 'Gemini') {
-                    // Gemini supports PDF files natively - will be handled in current message
+                  // Extract PDF text for all models (most reliable approach)
+                  try {
+                    const pdfText = await extractPdfText(file.data)
                     contentParts.push({
                       type: 'text',
-                      text: `[PDF file: ${file.filename}]`,
+                      text: `[PDF Document: ${file.filename}]\n\n${pdfText}`,
+                    })
+                  } catch (pdfError) {
+                    console.error('Error extracting PDF text:', pdfError)
+                    contentParts.push({
+                      type: 'text',
+                      text: `[PDF Document: ${file.filename} - text extraction failed]`,
                     })
                   }
                 }
@@ -259,38 +262,19 @@ export async function POST(req: Request) {
             })
           }
         } else if (file.mediaType === 'application/pdf') {
-          // Handle PDFs based on model capability
-          if (model === 'Gemini') {
-            // Gemini supports PDF files natively
-            try {
-              const base64Data = file.data.includes(',') ? file.data.split(',')[1] : file.data
-              contentParts.push({
-                type: 'file',
-                data: base64Data,
-                mimeType: 'application/pdf',
-              })
-            } catch (error) {
-              console.error('Error processing PDF for Gemini:', error)
-              contentParts.push({
-                type: 'text',
-                text: `[PDF file: ${file.filename} - processing failed]`,
-              })
-            }
-          } else {
-            // For DeepSeek and Claude: Extract text from PDF
-            try {
-              const pdfText = await extractPdfText(file.data)
-              contentParts.push({
-                type: 'text',
-                text: `[PDF Document: ${file.filename}]\n\n${pdfText}`,
-              })
-            } catch (error) {
-              console.error('Error extracting PDF text:', error)
-              contentParts.push({
-                type: 'text',
-                text: `[PDF Document: ${file.filename} - text extraction failed]`,
-              })
-            }
+          // Extract text from PDF for all models (most reliable approach)
+          try {
+            const pdfText = await extractPdfText(file.data)
+            contentParts.push({
+              type: 'text',
+              text: `[PDF Document: ${file.filename}]\n\n${pdfText}`,
+            })
+          } catch (error) {
+            console.error('Error extracting PDF text:', error)
+            contentParts.push({
+              type: 'text',
+              text: `[PDF Document: ${file.filename} - text extraction failed]`,
+            })
           }
         }
       }

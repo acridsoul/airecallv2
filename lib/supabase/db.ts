@@ -7,6 +7,8 @@ export interface Conversation {
   preview: string
   pinned: boolean
   folder_id: string | null
+  category_id: string | null
+  auto_categorized: boolean
   model: string
   created_at: string
   updated_at: string
@@ -37,6 +39,14 @@ export interface Template {
   name: string
   content: string
   snippet: string
+  created_at: string
+  updated_at: string
+}
+
+export interface Category {
+  id: string
+  user_id: string
+  name: string
   created_at: string
   updated_at: string
 }
@@ -131,7 +141,7 @@ export async function createConversation(
 
 export async function updateConversation(
   conversationId: string,
-  updates: Partial<Pick<Conversation, 'title' | 'preview' | 'pinned' | 'folder_id' | 'model'>>
+  updates: Partial<Pick<Conversation, 'title' | 'preview' | 'pinned' | 'folder_id' | 'model' | 'category_id' | 'auto_categorized'>>
 ): Promise<void> {
   const supabase = await createClient()
   
@@ -337,6 +347,96 @@ export async function deleteTemplate(templateId: string): Promise<void> {
     .from('templates')
     .delete()
     .eq('id', templateId)
+
+  if (error) throw error
+}
+
+// Categories
+export async function getCategories(userId: string): Promise<Category[]> {
+  const supabase = await createClient()
+  
+  const { data, error } = await supabase
+    .from('categories')
+    .select('*')
+    .eq('user_id', userId)
+    .order('name', { ascending: true })
+
+  if (error) throw error
+
+  return data || []
+}
+
+export async function createCategory(userId: string, name: string): Promise<Category> {
+  const supabase = await createClient()
+  
+  const { data, error } = await supabase
+    .from('categories')
+    .insert({
+      user_id: userId,
+      name,
+    })
+    .select()
+    .single()
+
+  if (error) {
+    // Handle unique constraint violation
+    if (error.code === '23505') {
+      throw new Error('Category already exists')
+    }
+    throw error
+  }
+
+  return data
+}
+
+export async function updateCategory(categoryId: string, name: string): Promise<void> {
+  const supabase = await createClient()
+  
+  const { error } = await supabase
+    .from('categories')
+    .update({ name })
+    .eq('id', categoryId)
+
+  if (error) {
+    if (error.code === '23505') {
+      throw new Error('Category name already exists')
+    }
+    throw error
+  }
+}
+
+export async function deleteCategory(categoryId: string): Promise<void> {
+  const supabase = await createClient()
+  
+  // First, set all conversations with this category to null
+  await supabase
+    .from('conversations')
+    .update({ category_id: null })
+    .eq('category_id', categoryId)
+  
+  // Then delete the category
+  const { error } = await supabase
+    .from('categories')
+    .delete()
+    .eq('id', categoryId)
+
+  if (error) throw error
+}
+
+export async function updateConversationCategory(
+  conversationId: string,
+  categoryId: string | null,
+  autoCategorized: boolean = false
+): Promise<void> {
+  const supabase = await createClient()
+  
+  const { error } = await supabase
+    .from('conversations')
+    .update({
+      category_id: categoryId,
+      auto_categorized: autoCategorized,
+    })
+    .eq('id', conversationId)
 
   if (error) throw error
 }

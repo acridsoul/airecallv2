@@ -5,6 +5,7 @@ import { Pencil, RefreshCw, Check, X, Square, FileText, Image as ImageIcon } fro
 import Message from "./Message"
 import Composer from "./Composer"
 import MarkdownContent from "./MarkdownContent"
+import CategorySelector from "./CategorySelector"
 import { cls, timeAgo } from "./utils"
 
 function ThinkingMessage({ onPause }) {
@@ -29,7 +30,7 @@ function ThinkingMessage({ onPause }) {
 }
 
 const ChatPane = forwardRef(function ChatPane(
-  { conversation, onSend, onEditMessage, onResendMessage, isThinking, onPauseThinking },
+  { conversation, onSend, onEditMessage, onResendMessage, isThinking, onPauseThinking, categories, onCategoryChange, userId },
   ref,
 ) {
   const [editingId, setEditingId] = useState(null)
@@ -79,8 +80,19 @@ const ChatPane = forwardRef(function ChatPane(
         <div className="mb-2 text-3xl font-serif tracking-tight sm:text-4xl md:text-5xl">
           <span className="block leading-[1.05] font-sans text-2xl">{conversation.title}</span>
         </div>
-        <div className="mb-4 text-sm text-zinc-500 dark:text-zinc-400">
-          Updated {timeAgo(conversation.updatedAt)} · {count} messages
+        <div className="mb-4 flex items-center justify-between">
+          <div className="text-sm text-zinc-500 dark:text-zinc-400">
+            Updated {timeAgo(conversation.updatedAt)} · {count} messages
+          </div>
+          {conversation && categories && onCategoryChange && userId && (
+            <CategorySelector
+              conversationId={conversation.id}
+              currentCategoryId={conversation.category_id}
+              categories={categories}
+              onCategoryChange={onCategoryChange}
+              userId={userId}
+            />
+          )}
         </div>
 
         <div className="mb-6 flex flex-wrap gap-2 border-b border-zinc-200 pb-5 dark:border-zinc-800">
